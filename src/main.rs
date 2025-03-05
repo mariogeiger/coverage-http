@@ -1,20 +1,22 @@
 use actix_files as fs;
 use actix_web::{App, HttpServer};
-use std::fs as std_fs;
-use std::io::{self, Write};
-use std::path::Path;
-use std::process;
-use std::process::{Command, Stdio};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    fs as std_fs,
+    io::{self, Write},
+    path::Path,
+    process::{self, Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
 };
-use std::thread;
-use std::time::Duration;
 
-async fn start_http_server(html_dir: &str, running: Arc<AtomicBool>) -> std::io::Result<()> {
-    println!("Starting HTTP server on http://localhost:8080");
-    println!("Navigate to this URL to view coverage reports");
+async fn start_http_server(html_dir: &str, running: Arc<AtomicBool>) -> io::Result<()> {
+    println!(
+        "Starting HTTP server on http://localhost:8080\nNavigate to this URL to view coverage reports"
+    );
 
     let html_dir = html_dir.to_string();
     let server = HttpServer::new(move || {
@@ -25,10 +27,10 @@ async fn start_http_server(html_dir: &str, running: Arc<AtomicBool>) -> std::io:
 
     let server_handle = server.handle();
 
-    // Set up a monitor task to shut down the server when running is set to false
+    // Monitor task to shut down server when running is false
     tokio::spawn(async move {
         while running.load(Ordering::SeqCst) {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(100).into()).await;
         }
         println!("Shutting down HTTP server...");
         server_handle.stop(true).await;
@@ -41,9 +43,7 @@ async fn start_http_server(html_dir: &str, running: Arc<AtomicBool>) -> std::io:
 fn run_coverage(python_cmd: &str) -> io::Result<()> {
     println!("Running coverage tests...");
 
-    let cmd_parts: Vec<&str> = python_cmd.split("&&").collect();
-
-    for cmd in cmd_parts {
+    for cmd in python_cmd.split("&&") {
         let trimmed_cmd = cmd.trim();
         println!("Executing: {}", trimmed_cmd);
 
@@ -69,40 +69,32 @@ fn run_coverage(python_cmd: &str) -> io::Result<()> {
 
 /// Find and return the path to the Python interpreter
 fn get_python_path() -> io::Result<String> {
-    // Try to run 'which python' (Unix) or 'where python' (Windows)
-    let command = if cfg!(target_os = "windows") {
-        Command::new("where").arg("python").output()?
+    let cmd = if cfg!(target_os = "windows") {
+        "where"
     } else {
-        Command::new("which").arg("python").output()?
+        "which"
     };
+    let output = Command::new(cmd).arg("python").output()?;
 
-    if command.status.success() {
-        // Convert bytes to string and trim whitespace/newlines
-        let path = String::from_utf8_lossy(&command.stdout).trim().to_string();
-        Ok(path)
+    Ok(if output.status.success() {
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     } else {
-        Ok("Python path not found".to_string())
-    }
+        "Python path not found".to_string()
+    })
 }
 
-/// Create a directory if it doesn't exist
-fn ensure_dir_exists(dir_path: &str) -> io::Result<()> {
-    let path = Path::new(dir_path);
-    if !path.exists() {
+/// Create directory and index.html if they don't exist
+fn setup_html_dir(dir_path: &str) -> io::Result<()> {
+    // Create directory if needed
+    if !Path::new(dir_path).exists() {
         println!("Creating directory: {}", dir_path);
-        std_fs::create_dir_all(path)?;
+        std_fs::create_dir_all(dir_path)?;
     }
-    Ok(())
-}
 
-/// Create a basic index.html file in the given directory if it doesn't exist
-fn ensure_index_html_exists(dir_path: &str) -> io::Result<()> {
+    // Create index.html if needed
     let index_path = Path::new(dir_path).join("index.html");
-
     if !index_path.exists() {
         println!("Creating empty index.html file in: {}", dir_path);
-
-        // Basic HTML content for the placeholder index.html
         let html_content = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -157,10 +149,7 @@ fn ensure_index_html_exists(dir_path: &str) -> io::Result<()> {
     </div>
 </body>
 </html>"#;
-
-        // Write to the file
-        let mut file = std_fs::File::create(&index_path)?;
-        file.write_all(html_content.as_bytes())?;
+        std_fs::write(&index_path, html_content)?;
     }
 
     Ok(())
@@ -168,34 +157,27 @@ fn ensure_index_html_exists(dir_path: &str) -> io::Result<()> {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    // Find and print Python interpreter path
-    match get_python_path() {
-        Ok(path) => println!("Python interpreter path: {}", path),
-        Err(e) => println!("Failed to determine Python interpreter path: {}", e),
+    // Print Python interpreter path
+    if let Ok(path) = get_python_path() {
+        println!("Python interpreter path: {}", path);
     }
 
     // The directory containing the HTML coverage reports
     let html_dir = "htmlcov";
+    setup_html_dir(html_dir)?;
 
-    // Populate the html_dir with empty index.html file if it doesn't exist
-    ensure_dir_exists(html_dir)?;
-    ensure_index_html_exists(html_dir)?;
-
-    // Default test path
-    let default_test_path = String::from(".");
-    let mut current_test_path = default_test_path.clone();
-
-    // Flag to control the HTTP server
+    // Control flag and test path setup
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
+    let mut current_test_path = ".".to_string();
 
     // Set up ctrl+c handler
     ctrlc::set_handler(move || {
         println!("Received Ctrl+C, shutting down...");
         r.store(false, Ordering::SeqCst);
 
-        // Force exit after a timeout if the program doesn't exit cleanly
-        thread::spawn(move || {
+        // Force exit after timeout
+        thread::spawn(|| {
             thread::sleep(Duration::from_secs(2));
             println!("Forcing exit...");
             process::exit(0);
@@ -206,8 +188,7 @@ async fn main() -> io::Result<()> {
     // Start HTTP server in a separate thread
     let server_running = running.clone();
     let server_thread = thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
             if let Err(e) = start_http_server(html_dir, server_running).await {
                 eprintln!("HTTP server error: {}", e);
             }
@@ -228,14 +209,14 @@ async fn main() -> io::Result<()> {
             break;
         }
 
-        // If input is not empty, update the test path
+        // Update test path if input not empty
         let trimmed_input = input.trim();
         if !trimmed_input.is_empty() && trimmed_input.to_lowercase() != "exit" {
             current_test_path = trimmed_input.to_string();
             println!("Test path updated to: {}", current_test_path);
         }
 
-        // Generate the Python command with the current test path
+        // Run coverage with current test path
         let python_cmd = format!(
             "python -m coverage run -m pytest {} && python -m coverage html",
             current_test_path
@@ -248,19 +229,17 @@ async fn main() -> io::Result<()> {
         println!("Current test path: {}", current_test_path);
     }
 
-    // Signal the server to stop and wait for it
+    // Cleanup and shutdown
     running.store(false, Ordering::SeqCst);
 
-    // Set a timeout for joining the server thread
-    let join_handle = thread::spawn(move || {
+    if let Err(e) = thread::spawn(move || {
         if let Err(e) = server_thread.join() {
             eprintln!("Error joining server thread: {:?}", e);
         }
-    });
-
-    // Wait for the join to complete with a timeout
-    if join_handle.join().is_err() {
-        eprintln!("Timed out waiting for server thread to join");
+    })
+    .join()
+    {
+        eprintln!("Timed out waiting for server thread to join: {:?}", e);
     }
 
     println!("Goodbye!");
