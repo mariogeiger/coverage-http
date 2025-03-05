@@ -1,0 +1,10 @@
+[package]
+name = "coverage-http"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+actix-web = "4.4"
+actix-files = "0.6"
+tokio = { version = "1", features = ["full"] }
+ctrlc = "3.4"
